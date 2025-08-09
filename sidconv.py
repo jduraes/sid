@@ -108,30 +108,66 @@ ANSI_CHR_MAP = {
     145: f"{ANSI_SEQ}[A",                # Cursor up
     157: f"{ANSI_SEQ}[D",                # Cursor left
     29:  f"{ANSI_SEQ}[C",                # Cursor right
-    # Basic colors (approximate):
+    # Basic colors (approximate common set):
+    144: f"{ANSI_SEQ}[30m",              # Black
     5:   f"{ANSI_SEQ}[37m",              # White
     28:  f"{ANSI_SEQ}[31m",              # Red
     30:  f"{ANSI_SEQ}[32m",              # Green
     31:  f"{ANSI_SEQ}[34m",              # Blue
-    144: f"{ANSI_SEQ}[30m",              # Black
+    # Some additional approximations often used in PETSCII programs
+    158: f"{ANSI_SEQ}[33m",              # Yellow (approx)
+    159: f"{ANSI_SEQ}[91m",              # Light Red (bright red)
+    155: f"{ANSI_SEQ}[90m",              # Grey (bright black)
+    156: f"{ANSI_SEQ}[33m",              # Brown -> Yellow (closest)
     # Reset color (use 0m)
     18:  f"{ANSI_SEQ}[0m",               # Reverse off (approx as reset)
+}
+
+# Optional mapping to helper variables
+HELPER_FOR_CODE = {
+    147: "CLS$",
+    19:  "HOME$",
+    17:  "CUD$",
+    145: "CUU$",
+    157: "CUL$",
+    29:  "CUR$",
+    144: "COL_BLACK$",
+    5:   "COL_WHITE$",
+    28:  "COL_RED$",
+    30:  "COL_GREEN$",
+    31:  "COL_BLUE$",
+    158: "COL_YELLOW$",
+    155: "COL_GREY$",
+    18:  "COL_RESET$",
 }
 
 CHR_CALL_RE = re.compile(r"CHR\$\(\s*(\d+)\s*\)", re.IGNORECASE)
 
 
-def map_chr_calls_to_profile(stmt: str, screen_profile: str) -> str:
-    if screen_profile != "ansi":
+def map_chr_calls_to_profile(stmt: str, screen_profile: str, unknown_policy: str) -> str:
+    if screen_profile not in ("ansi", "ansi-helpers"):
+        # Possibly strip unknown PETSCII
+        if unknown_policy == "strip":
+            def strip_repl(m: re.Match) -> str:
+                n = int(m.group(1))
+                # Remove control-range or high-range CHR$ if not printable ASCII
+                if n < 32 or n >= 128:
+                    return "\"\""
+                return m.group(0)
+            return CHR_CALL_RE.sub(strip_repl, stmt)
         return stmt
 
     def repl(m: re.Match) -> str:
         n = int(m.group(1))
+        if screen_profile == "ansi-helpers" and n in HELPER_FOR_CODE:
+            return HELPER_FOR_CODE[n]
         if n in ANSI_CHR_MAP:
             esc = ANSI_CHR_MAP[n]
-            # Return as a quoted string literal suitable for BASIC
-            # Double quotes inside are not present, so safe
             return f'"{esc}"'
+        # Unknown PETSCII
+        if unknown_policy == "strip":
+            if n < 32 or n >= 128:
+                return "\"\""
         return m.group(0)
 
     return CHR_CALL_RE.sub(repl, stmt)
@@ -139,7 +175,8 @@ def map_chr_calls_to_profile(stmt: str, screen_profile: str) -> str:
 
 def process_line_body(body: str, base_vars: Set[str], warn_out_of_range: bool,
                       scale_for: Optional[int], scale_for_vars: Set[str],
-                      screen_profile: str, map_get_to_inkey: bool) -> str:
+                      screen_profile: str, map_get_to_inkey: bool,
+                      unknown_policy: str) -> str:
     # Split by ':' and process each sub-statement
     stmts = split_colon_statements(body)
 
@@ -181,7 +218,7 @@ def process_line_body(body: str, base_vars: Set[str], warn_out_of_range: bool,
                 out_parts.append(out_dat)
                 continue
         # Screen/profile mapping for CHR$ controls
-        s2 = map_chr_calls_to_profile(s, screen_profile)
+        s2 = map_chr_calls_to_profile(s, screen_profile, unknown_policy)
         out_parts.append(s2)
     return ':'.join(out_parts)
 
@@ -195,8 +232,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warn-out-of-range", action="store_true", help="Append REM warning when register offset is outside 0-24")
     p.add_argument("--scale-for", type=int, default=0, help="Scale simple FOR var=1 TO N loops by this factor (0 disables)")
     p.add_argument("--scale-for-vars", type=str, default="T,W,DELAY,D", help="Comma-separated variable names for delay loop scaling")
-    p.add_argument("--screen-profile", choices=["ansi","none"], default="ansi", help="Map common C64 PETSCII CHR$() controls to terminal sequences (default ansi)")
+    p.add_argument("--screen-profile", choices=["ansi","ansi-helpers","none"], default="ansi", help="Map common C64 PETSCII CHR$() controls to terminal sequences or helper variables (default ansi)")
+    p.add_argument("--unknown-petscii", choices=["leave","strip","warn"], default="leave", help="How to handle unknown PETSCII CHR$ codes (default leave)")
     p.add_argument("--map-get-to-inkey", action="store_true", help="Replace GET X$ with X$=INKEY$ for keypress handling")
+    p.add_argument("--inject-ansi-helpers", action="store_true", help="Insert helper variables (CLS$, HOME$, etc.) in header for use with --screen-profile ansi-helpers")
     return p.parse_args()
 
 
@@ -241,10 +280,37 @@ def main():
     output_lines: List[str] = []
 
     # Insert header first (numbered if possible)
+    insert_base_ln = 5
     if header_ln is not None:
         output_lines.append(f"{header_ln} {header_text}")
+        insert_base_ln = header_ln + 1
     else:
         output_lines.append(f"5 {header_text}")
+        insert_base_ln = 6
+
+    # Optionally inject helper variables
+    if args.inject_ansi_helpers and args.screen_profile == "ansi-helpers":
+        helpers = [
+            ("CLS$", f'"{ANSI_SEQ}[2J{ANSI_SEQ}[H"'),
+            ("HOME$", f'"{ANSI_SEQ}[H"'),
+            ("CUU$", f'"{ANSI_SEQ}[A"'),
+            ("CUD$", f'"{ANSI_SEQ}[B"'),
+            ("CUL$", f'"{ANSI_SEQ}[D"'),
+            ("CUR$", f'"{ANSI_SEQ}[C"'),
+            ("COL_RESET$", f'"{ANSI_SEQ}[0m"'),
+            ("COL_BLACK$", f'"{ANSI_SEQ}[30m"'),
+            ("COL_RED$", f'"{ANSI_SEQ}[31m"'),
+            ("COL_GREEN$", f'"{ANSI_SEQ}[32m"'),
+            ("COL_YELLOW$", f'"{ANSI_SEQ}[33m"'),
+            ("COL_BLUE$", f'"{ANSI_SEQ}[34m"'),
+            ("COL_GREY$", f'"{ANSI_SEQ}[90m"'),
+            ("COL_WHITE$", f'"{ANSI_SEQ}[37m"'),
+        ]
+        ln = insert_base_ln
+        for name, expr in helpers:
+            output_lines.append(f"{ln} {name}={expr}")
+            ln += 1
+        insert_base_ln = ln
 
     for ln, body in parsed_lines:
         if ln is None:
@@ -253,7 +319,8 @@ def main():
             continue
         new_body = process_line_body(body, base_vars, args.warn_out_of_range,
                                       args.scale_for if args.scale_for > 0 else None, scale_for_vars,
-                                      args.screen_profile, args.map_get_to_inkey)
+                                      args.screen_profile, args.map_get_to_inkey,
+                                      args.unknown_petscii)
 
         # If the line contains an assignment of a known base var, rewrite it to BASE=0 on RC2014
         # This keeps program semantics aligned to REG/DAT addressing model.

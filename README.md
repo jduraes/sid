@@ -31,12 +31,22 @@ Usage
 - Screen/ANSI mappings for PETSCII controls:
   python3 sidconv.py input.bas output.bas --screen-profile ansi
 
-  This rewrites CHR$(n) for common C64 controls to ANSI sequences (e.g., CHR$(147) clear screen -> ESC[2J ESC[H, cursor moves -> ESC[A/B/C/D, and a few basic colors). Use --screen-profile none to disable.
+  This rewrites CHR$(n) for common C64 controls to ANSI sequences (e.g., CHR$(147) clear screen -> ESC[2J ESC[H, cursor moves -> ESC[A/B/C/D, and a color subset).
+
+  Helper variables mode (cleaner output):
+  python3 sidconv.py input.bas output.bas --screen-profile ansi-helpers --inject-ansi-helpers
+
+  This replaces CHR$(n) control codes with variables like CLS$, HOME$, CUU$/CUD$/CUL$/CUR$, and COL_*$, and injects their definitions near the header.
 
 - Keyboard GET to INKEY$ (optional):
   python3 sidconv.py input.bas output.bas --map-get-to-inkey
 
   Rewrites simple GET X$ to X$=INKEY$ for Microsoft BASIC-style key polling.
+
+- Unknown PETSCII handling:
+  python3 sidconv.py input.bas output.bas --unknown-petscii strip
+
+  Policies: leave (default), strip (remove non-printable CHR$), warn (planned; no-op for now but reserved).
 
 Example
 Input (C64 BASIC):
@@ -60,7 +70,7 @@ Output (RC2014 MS BASIC):
 
 Notes
 - Only SID POKEs are translated. Other POKEs (VIC, screen RAM, KERNAL) are not.
-- Screen control codes in CHR$(n) can be mapped to ANSI with --screen-profile ansi. If your terminal doesn’t support ANSI, use --screen-profile none.
+- Screen control codes in CHR$(n) can be mapped to ANSI with --screen-profile ansi. If your terminal doesn’t support ANSI, use --screen-profile none. For cleaner output with reusable controls, use --screen-profile ansi-helpers with --inject-ansi-helpers.
 - GET mapping requires INKEY$ support on your MS BASIC. If absent, leave it off.
 - Reads and exotic features (SYS, DATA-driven ML) are out of scope.
 - If the first program line number is small, the header is inserted as line 0 to precede it.
