@@ -98,8 +98,48 @@ def rewrite_poke(arg_addr: str, arg_val: str, base_vars: Set[str], warn_out_of_r
     return f"OUT REG,{offset_expr}", f"OUT DAT,{val_expr}{rem}"
 
 
+ANSI_SEQ = "\x1b"
+
+# Minimal PETSCII -> ANSI mappings (best-effort)
+ANSI_CHR_MAP = {
+    147: f"{ANSI_SEQ}[2J{ANSI_SEQ}[H",   # Clear screen + home
+    19:  f"{ANSI_SEQ}[H",                # Home cursor
+    17:  f"{ANSI_SEQ}[B",                # Cursor down
+    145: f"{ANSI_SEQ}[A",                # Cursor up
+    157: f"{ANSI_SEQ}[D",                # Cursor left
+    29:  f"{ANSI_SEQ}[C",                # Cursor right
+    # Basic colors (approximate):
+    5:   f"{ANSI_SEQ}[37m",              # White
+    28:  f"{ANSI_SEQ}[31m",              # Red
+    30:  f"{ANSI_SEQ}[32m",              # Green
+    31:  f"{ANSI_SEQ}[34m",              # Blue
+    144: f"{ANSI_SEQ}[30m",              # Black
+    # Reset color (use 0m)
+    18:  f"{ANSI_SEQ}[0m",               # Reverse off (approx as reset)
+}
+
+CHR_CALL_RE = re.compile(r"CHR\$\(\s*(\d+)\s*\)", re.IGNORECASE)
+
+
+def map_chr_calls_to_profile(stmt: str, screen_profile: str) -> str:
+    if screen_profile != "ansi":
+        return stmt
+
+    def repl(m: re.Match) -> str:
+        n = int(m.group(1))
+        if n in ANSI_CHR_MAP:
+            esc = ANSI_CHR_MAP[n]
+            # Return as a quoted string literal suitable for BASIC
+            # Double quotes inside are not present, so safe
+            return f'"{esc}"'
+        return m.group(0)
+
+    return CHR_CALL_RE.sub(repl, stmt)
+
+
 def process_line_body(body: str, base_vars: Set[str], warn_out_of_range: bool,
-                      scale_for: Optional[int], scale_for_vars: Set[str]) -> str:
+                      scale_for: Optional[int], scale_for_vars: Set[str],
+                      screen_profile: str, map_get_to_inkey: bool) -> str:
     # Split by ':' and process each sub-statement
     stmts = split_colon_statements(body)
 
@@ -123,6 +163,14 @@ def process_line_body(body: str, base_vars: Set[str], warn_out_of_range: bool,
 
     out_parts: List[str] = []
     for s in scaled_stmts:
+        # Optional: map GET var$ -> var$=INKEY$
+        if map_get_to_inkey:
+            mg = re.match(r"^\s*GET\s+([A-Z][A-Z0-9]?)\$?\s*$", s, re.IGNORECASE)
+            if mg:
+                var = mg.group(1).upper() + "$"
+                out_parts.append(f"{var}=INKEY$")
+                continue
+
         # Try a POKE rewrite
         pm = POKE_STMT_RE.match(s)
         if pm:
@@ -132,13 +180,14 @@ def process_line_body(body: str, base_vars: Set[str], warn_out_of_range: bool,
                 out_parts.append(out_reg)
                 out_parts.append(out_dat)
                 continue
-        # No change
-        out_parts.append(s)
+        # Screen/profile mapping for CHR$ controls
+        s2 = map_chr_calls_to_profile(s, screen_profile)
+        out_parts.append(s2)
     return ':'.join(out_parts)
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Convert C64 BASIC SID POKEs to RC2014 MS BASIC OUTs")
+    p = argparse.ArgumentParser(description="Convert C64 BASIC SID POKEs to RC2014 MS BASIC OUTs and improve screen I/O compatibility")
     p.add_argument("input", help="Input .BAS file (C64 BASIC)")
     p.add_argument("output", help="Output .BAS file (RC2014 MS BASIC)")
     p.add_argument("--reg", type=int, default=DEFAULT_REG, help="SID-Ulator REG port (default 212)")
@@ -146,6 +195,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warn-out-of-range", action="store_true", help="Append REM warning when register offset is outside 0-24")
     p.add_argument("--scale-for", type=int, default=0, help="Scale simple FOR var=1 TO N loops by this factor (0 disables)")
     p.add_argument("--scale-for-vars", type=str, default="T,W,DELAY,D", help="Comma-separated variable names for delay loop scaling")
+    p.add_argument("--screen-profile", choices=["ansi","none"], default="ansi", help="Map common C64 PETSCII CHR$() controls to terminal sequences (default ansi)")
+    p.add_argument("--map-get-to-inkey", action="store_true", help="Replace GET X$ with X$=INKEY$ for keypress handling")
     return p.parse_args()
 
 
@@ -200,7 +251,9 @@ def main():
             # Carry through any non-numbered lines untouched
             output_lines.append(body)
             continue
-        new_body = process_line_body(body, base_vars, args.warn_out_of_range, args.scale_for if args.scale_for > 0 else None, scale_for_vars)
+        new_body = process_line_body(body, base_vars, args.warn_out_of_range,
+                                      args.scale_for if args.scale_for > 0 else None, scale_for_vars,
+                                      args.screen_profile, args.map_get_to_inkey)
 
         # If the line contains an assignment of a known base var, rewrite it to BASE=0 on RC2014
         # This keeps program semantics aligned to REG/DAT addressing model.

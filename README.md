@@ -28,6 +28,16 @@ Usage
   You can set which variables count as delay counters (comma-separated):
     --scale-for-vars T,W,DELAY,D
 
+- Screen/ANSI mappings for PETSCII controls:
+  python3 sidconv.py input.bas output.bas --screen-profile ansi
+
+  This rewrites CHR$(n) for common C64 controls to ANSI sequences (e.g., CHR$(147) clear screen -> ESC[2J ESC[H, cursor moves -> ESC[A/B/C/D, and a few basic colors). Use --screen-profile none to disable.
+
+- Keyboard GET to INKEY$ (optional):
+  python3 sidconv.py input.bas output.bas --map-get-to-inkey
+
+  Rewrites simple GET X$ to X$=INKEY$ for Microsoft BASIC-style key polling.
+
 Example
 Input (C64 BASIC):
   5 B=54272
@@ -50,6 +60,8 @@ Output (RC2014 MS BASIC):
 
 Notes
 - Only SID POKEs are translated. Other POKEs (VIC, screen RAM, KERNAL) are not.
+- Screen control codes in CHR$(n) can be mapped to ANSI with --screen-profile ansi. If your terminal doesn’t support ANSI, use --screen-profile none.
+- GET mapping requires INKEY$ support on your MS BASIC. If absent, leave it off.
 - Reads and exotic features (SYS, DATA-driven ML) are out of scope.
 - If the first program line number is small, the header is inserted as line 0 to precede it.
 - If your hardware ports differ (e.g., A4/A5 or others), pass --reg/--dat accordingly.
